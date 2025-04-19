@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const questionSchema = mongoose.Schema(
   {
     text: {
-      type: String,
+      type: String,      //hello
       required: [true, 'Please add question text'],
       unique: true
     },
@@ -13,7 +13,7 @@ const questionSchema = mongoose.Schema(
     },
     difficulty: {
       type: String,
-      enum: ['easy', 'medium', 'hard'],
+      enum: ['easy', 'medium', 'hard'], //hii
       default: 'medium'
     },
     pointValue: {
