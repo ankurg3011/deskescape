@@ -44,6 +44,10 @@ const roomSchema = mongoose.Schema(
       enum: ['waiting', 'playing', 'completed'],
       default: 'waiting'
     },
+    questionStartTime: {
+      type: Date,
+      default: Date.now
+    },
     players: [
       {
         user: {
@@ -57,6 +61,11 @@ const roomSchema = mongoose.Schema(
         isReady: {
           type: Boolean,
           default: false
+        },
+        // Add this field for tracking streaks
+        answerStreak: {
+          type: Number,
+          default: 0
         }
       }
     ],
@@ -84,6 +93,14 @@ const roomSchema = mongoose.Schema(
           type: Boolean
         },
         round: {
+          type: Number
+        },
+        // Add these new fields
+        answeredAt: {
+          type: Date,
+          default: Date.now
+        },
+        responseTimeSeconds: {
           type: Number
         }
       }

@@ -27,7 +27,7 @@ const getRandomQuestions = asyncHandler(async (req, res) => {
 // @route   POST /api/rooms/:id/answers
 // @access  Public
 const submitAnswer = asyncHandler(async (req, res) => {
-  const { userId, answer } = req.body;
+  const { userId, answer, timestamp } = req.body;
   const roomId = req.params.id;
 
   // Validate required fields
@@ -71,13 +71,33 @@ const submitAnswer = asyncHandler(async (req, res) => {
     throw new Error('You have already answered this question');
   }
 
-  // Add the answer
+  // Calculate response time in seconds
+  const currentTime = Date.now();
+  // If timestamp is provided from client, use it; otherwise use server time
+  const clientTimestamp = timestamp || currentTime;
+  const questionStartTime = room.questionStartTime || clientTimestamp;
+  const responseTimeSeconds = (clientTimestamp - questionStartTime) / 1000;
+
+  // Add the answer with timing information
   room.answers.push({
     user: userId,
     question: room.currentQuestion,
     answer: answer,
-    round: room.currentRound
+    round: room.currentRound,
+    answeredAt: new Date(clientTimestamp),
+    responseTimeSeconds: responseTimeSeconds
   });
+
+  // Calculate speed bonus
+  let speedBonus = 0;
+  if (responseTimeSeconds < 5) {
+    speedBonus = 3;  // Fast response bonus
+  } else if (responseTimeSeconds <= 15) {
+    speedBonus = 1;  // Medium speed bonus
+  }
+
+  // Update streak for this player
+  room.players[playerIndex].answerStreak = room.players[playerIndex].answerStreak + 1;
 
   await room.save();
 
@@ -93,7 +113,9 @@ const submitAnswer = asyncHandler(async (req, res) => {
   if (allPlayersAnswered) {
     // Calculate how many players answered "Yes"
     const yesAnswers = currentRoundAnswers.filter(a => a.answer === true).length;
-    const pointsToAward = 10;
+    
+    // Base points to award
+    const basePoints = 10;
 
     // Award points based on whether player is in majority or minority
     for (const answer of currentRoundAnswers) {
@@ -107,6 +129,19 @@ const submitAnswer = asyncHandler(async (req, res) => {
         
         // Award points to minority answers
         if (isInMinority) {
+          // Add base points (10) + 2 for every answer + speed bonus
+          let pointsToAward = basePoints + 2;
+          
+          // Find this player's answer to get the speed bonus
+          const playerAnswer = currentRoundAnswers.find(a => a.user.toString() === answer.user.toString());
+          if (playerAnswer) {
+            if (playerAnswer.responseTimeSeconds < 5) {
+              pointsToAward += 3;  // Fast response bonus
+            } else if (playerAnswer.responseTimeSeconds <= 15) {
+              pointsToAward += 1;  // Medium speed bonus
+            }
+          }
+          
           room.players[playerIndex].points += pointsToAward;
           
           // Also update user's total points in their profile
@@ -115,6 +150,30 @@ const submitAnswer = asyncHandler(async (req, res) => {
               points: pointsToAward,
               dailyPoints: pointsToAward,
               'stats.totalPoints': pointsToAward
+            }
+          });
+        } else {
+          // Even if not in minority, still award base +2 points + speed bonus
+          let participationPoints = 2; // Base for participation
+          
+          // Find this player's answer to get the speed bonus
+          const playerAnswer = currentRoundAnswers.find(a => a.user.toString() === answer.user.toString());
+          if (playerAnswer) {
+            if (playerAnswer.responseTimeSeconds < 5) {
+              participationPoints += 3;  // Fast response bonus
+            } else if (playerAnswer.responseTimeSeconds <= 15) {
+              participationPoints += 1;  // Medium speed bonus
+            }
+          }
+          
+          room.players[playerIndex].points += participationPoints;
+          
+          // Update user profile with participation points
+          await User.findByIdAndUpdate(answer.user, {
+            $inc: {
+              points: participationPoints,
+              dailyPoints: participationPoints,
+              'stats.totalPoints': participationPoints
             }
           });
         }
@@ -126,7 +185,9 @@ const submitAnswer = asyncHandler(async (req, res) => {
 
   res.status(200).json({ 
     message: 'Answer submitted successfully',
-    allPlayersAnswered
+    allPlayersAnswered,
+    responseTime: responseTimeSeconds,
+    speedBonus: speedBonus
   });
 });
 
@@ -173,6 +234,30 @@ const nextRound = asyncHandler(async (req, res) => {
     throw new Error('All players must answer before advancing to the next round');
   }
 
+  // Reset streaks for players who answered incorrectly or were in majority
+  const yesAnswers = currentRoundAnswers.filter(a => a.answer === true).length;
+  
+  for (const player of room.players) {
+    const playerAnswer = currentRoundAnswers.find(
+      a => a.user.toString() === player.user.toString()
+    );
+    
+    if (playerAnswer) {
+      const isInMinority = (yesAnswers < room.players.length / 2 && playerAnswer.answer === true) || 
+                           (yesAnswers > room.players.length / 2 && playerAnswer.answer === false);
+      
+      // If not in minority, reset streak
+      if (!isInMinority) {
+        const playerIndex = room.players.findIndex(
+          p => p.user.toString() === player.user.toString()
+        );
+        if (playerIndex !== -1) {
+          room.players[playerIndex].answerStreak = 0;
+        }
+      }
+    }
+  }
+
   // Increment round counter
   room.currentRound += 1;
 
@@ -199,6 +284,9 @@ const nextRound = asyncHandler(async (req, res) => {
   } else {
     // Set the next question
     room.currentQuestion = room.questions[room.currentRound - 1];
+    
+    // Set question start time for the new round
+    room.questionStartTime = Date.now();
   }
 
   await room.save();

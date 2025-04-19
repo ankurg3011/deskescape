@@ -83,12 +83,33 @@ const handleStartGame = async (io, socket, data) => {
       return;
     }
     
-    // Emit game started event to all players
+    // Set the question start time when game is starting
+    room.questionStartTime = Date.now();
+    
+    // Initialize player streaks to 0
+    for (let i = 0; i < room.players.length; i++) {
+      room.players[i].answerStreak = 0;
+    }
+    
+    await room.save();
+    
+    // Get updated room after save
+    const updatedRoom = await Room.findById(roomId)
+      .populate('currentQuestion')
+      .populate('players.user', 'name avatar');
+    
+    // Emit game started event to all players with timing information
     io.to(roomId).emit('game-started', {
       roomId,
-      currentRound: room.currentRound,
-      currentQuestion: room.currentQuestion,
-      players: room.players
+      currentRound: updatedRoom.currentRound,
+      currentQuestion: updatedRoom.currentQuestion,
+      players: updatedRoom.players,
+      questionStartTime: updatedRoom.questionStartTime
+    });
+    
+    // Notify players that timing has started for the first question
+    io.to(roomId).emit('question-timer-started', {
+      questionStartTime: updatedRoom.questionStartTime
     });
     
   } catch (error) {
@@ -101,6 +122,9 @@ const handleStartGame = async (io, socket, data) => {
 const handleSubmitAnswer = async (io, socket, data) => {
   try {
     const { roomId, userId, answer } = data;
+    
+    // Add timestamp for when the answer was received
+    const timestamp = Date.now();
     
     // Get room data
     const room = await Room.findById(roomId);
@@ -118,12 +142,69 @@ const handleSubmitAnswer = async (io, socket, data) => {
       return;
     }
     
-    // Emit event to all users that a player has answered
-    io.to(roomId).emit('player-answered', { userId, roomId });
+    // Calculate response time in seconds
+    const questionStartTime = room.questionStartTime || timestamp;
+    const responseTimeSeconds = (timestamp - questionStartTime) / 1000;
+    
+    // Calculate speed bonus based on response time
+    let speedBonus = 0;
+    if (responseTimeSeconds < 5) {
+      speedBonus = 3;  // Fast response bonus
+    } else if (responseTimeSeconds <= 15) {
+      speedBonus = 1;  // Medium speed bonus
+    }
+    
+    // Find the player in the room
+    const playerIndex = room.players.findIndex(
+      player => player.user.toString() === userId
+    );
+    
+    // Check if player is in the room
+    if (playerIndex === -1) {
+      socket.emit('error', { message: 'Player not found in this room' });
+      return;
+    }
+    
+    // Check if this player already answered this question in this round
+    const existingAnswer = room.answers.find(
+      a => a.user.toString() === userId && 
+           a.question.toString() === room.currentQuestion.toString() &&
+           a.round === room.currentRound
+    );
+    
+    if (existingAnswer) {
+      socket.emit('error', { message: 'You have already answered this question' });
+      return;
+    }
+    
+    // Add the answer with timing information
+    room.answers.push({
+      user: userId,
+      question: room.currentQuestion,
+      answer: answer,
+      round: room.currentRound,
+      answeredAt: new Date(timestamp),
+      responseTimeSeconds: responseTimeSeconds
+    });
+    
+    // Update player's streak
+    room.players[playerIndex].answerStreak = 
+      (room.players[playerIndex].answerStreak || 0) + 1;
+    
+    // Save the updated room
+    await room.save();
+    
+    // Emit event to all users that a player has answered with response time info
+    io.to(roomId).emit('player-answered', { 
+      userId, 
+      roomId,
+      responseTime: responseTimeSeconds,
+      speedBonus: speedBonus
+    });
     
     // Check if all players have answered
     const currentRoundAnswers = room.answers.filter(
-      a => a.question.toString() === room.currentQuestion.toString() && 
+      a => a.question.toString() === room.currentQuestion.toString() &&
            a.round === room.currentRound
     );
     
@@ -137,15 +218,29 @@ const handleSubmitAnswer = async (io, socket, data) => {
         .populate('players.user', 'name avatar')
         .populate('currentQuestion');
       
-      // Emit event that all players have answered
+      // Prepare detailed answer data including timing information
+      const answerDetails = currentRoundAnswers.map(a => ({
+        userId: a.user,
+        answer: a.answer,
+        responseTime: a.responseTimeSeconds,
+        speedBonus: a.responseTimeSeconds < 5 ? 3 : 
+                   (a.responseTimeSeconds <= 15 ? 1 : 0),
+        streak: updatedRoom.players.find(p => p.user.toString() === a.user.toString())?.answerStreak || 0
+      }));
+      
+      // Emit event that all players have answered with detailed stats
       io.to(roomId).emit('all-players-answered', {
         yesCount: yesAnswers.length,
         noCount: noAnswers.length,
         players: updatedRoom.players,
-        answers: currentRoundAnswers.map(a => ({
-          userId: a.user,
-          answer: a.answer
-        }))
+        answers: answerDetails,
+        // Add additional summary stats for the round
+        roundStats: {
+          fastestAnswer: Math.min(...currentRoundAnswers.map(a => a.responseTimeSeconds)),
+          averageResponseTime: currentRoundAnswers.reduce((acc, a) => acc + a.responseTimeSeconds, 0) / 
+                              currentRoundAnswers.length,
+          totalSpeedBonuses: answerDetails.reduce((acc, a) => acc + a.speedBonus, 0)
+        }
       });
     }
     
